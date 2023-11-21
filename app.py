@@ -1,3 +1,4 @@
+from tokenize import group
 from flask import Flask, render_template
 import requests
 from datetime import datetime, timedelta
@@ -25,6 +26,23 @@ groups_collection = db['Groups']
 messages_collection = db['Messages']
 oneai_collection = db['OneAISummary']
 
+
+def insert_into_mongodb(groups, collection):
+    for group in groups:
+        collection.update_one({'id': group['id']}, {'$set': group}, upsert=True)
+
+
+def retrieve_from_mongodb(collection, group_id, before_time):
+    query = {
+        'group_id': group_id,
+    }
+    if before_time != None:
+        query['created_at'] = {'$gt': before_time}
+
+    groups_cursor = collection.find(query)
+    return list(groups_cursor)
+    
+
 # fetching the group_ids -------------------------------------------------------
 def fetchGroupData(access_token):
     url = 'https://api.groupme.com/v3/groups'
@@ -40,26 +58,23 @@ def fetchGroupData(access_token):
         print(f"Failed to get groups. Status code: {response.status_code}")
         return None
 
-def insert_groups_into_mongodb(groups, collection):
-    for group in groups['response']:
-        group_info = {'id': group['id'], 
-                       'name': group['name'],
-                       'image_url': group['image_url']}
-        collection.update_one({'id': group['id']}, {'$set': group_info}, upsert=True)
-
-
-def retrieve_groups_from_mongodb(collection):
-    groups_cursor = collection.find({})
-    return list(groups_cursor)
-
 
 @app.route("/home")
 def fetch_group_data():
-    groups = fetchGroupData(access_token=GM_API_KEY)
-    insert_groups_into_mongodb(groups, groups_collection)
-    groups_from_db = retrieve_groups_from_mongodb(groups_collection)
+    data = fetchGroupData(access_token=GM_API_KEY)
+    groups = []
+    for group in data['response']:
+        group_info = {'id': group['id'], 
+                      'name': group['name'],
+                      'image_url': group['image_url']}
+        groups.append(group_info)
+
+    insert_into_mongodb(groups, groups_collection)
+    groups_from_db = retrieve_from_mongodb(groups_collection, None, None)
+    for group in groups_from_db:
+        print(group)
     return render_template('home.html', group_data=groups_from_db)
-# ------------------------------------------------------------------------------
+
 
 # fetching the group_messages---------------------------------------------------
 def getMessages(access_token, group_id):
@@ -67,9 +82,8 @@ def getMessages(access_token, group_id):
     
     # Change for different time periods
     one_week_ago = datetime.now() - timedelta(weeks=1)
-    # one_day_ago = datetime.now() - timedelta(days=1)
-    
-    # Initialize parameters for the API call
+    one_day_ago = datetime.now() - timedelta(days=1)
+
     params = {
         'token': access_token,
         'limit': 100
@@ -125,7 +139,7 @@ def retrieve_messages_from_mongodb(collection, filter):
     return list(messages_cursor)
 
 
-def getFormattedMessages(messages_from_db):
+def format_messages(messages_from_db):
     formatted_messages = []
     for message in messages_from_db:
         try:
@@ -138,8 +152,9 @@ def getFormattedMessages(messages_from_db):
 
     return formatted_messages
 
-
+# TODO: Post request not going through
 def oneAi_summary(oneAi_token, messages, skill): # message is in {name: message} form
+    print('1')
     url = "https://api.oneai.com/api/v0/pipeline"
   
     headers = {
@@ -160,9 +175,12 @@ def oneAi_summary(oneAi_token, messages, skill): # message is in {name: message}
             }
         ],
     }
-    r = requests.post(url, json=payload, headers=headers)
-    data = r.json()
+    # r = requests.post(url, json=payload, headers=headers)
+    # data = r.json()
+    # print(data)
+    print('2')
     try:
+        print('3')
         r = requests.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
@@ -181,23 +199,28 @@ def oneAi_summary(oneAi_token, messages, skill): # message is in {name: message}
 
 @app.route("/group/<int:group_id>")
 def load_group_page(group_id):
-
     messages = getMessages(access_token=GM_API_KEY, group_id=group_id)
-    insert_messages_into_mongodb(messages, messages_collection)
-    messages_from_db = retrieve_messages_from_mongodb(messages_collection, group_id)
-    formatted_messages = getFormattedMessages(messages_from_db)
-    print(formatted_messages)
+    insert_into_mongodb(messages, messages_collection)
+    one_week_ago = datetime.now() - timedelta(weeks=1)
+    one_day_ago = datetime.now() - timedelta(days=1)
+    messages_day = retrieve_from_mongodb(messages_collection, group_id=str(group_id), before_time=one_day_ago)
+    messages_week = retrieve_from_mongodb(messages_collection, group_id=str(group_id), before_time=one_week_ago)
+    messages_day_formatted = format_messages(messages_day)
+    messages_week_formatted = format_messages(messages_week)
+    print(messages_day_formatted)
+    print(messages_week_formatted)
     print("A")
-    summary = oneAi_summary(ONEAI_KEY, formatted_messages, "summarize")
-    print(f'Summary: {summary}\n')
-    # summary = "Avihhan has joined the group. Zach Cheng, Vijay Wulfekuhle and Raphael Palacio will go to Chick-fil-A on Saturday at 8 pm."
+    summary_day = oneAi_summary(ONEAI_KEY, messages_day_formatted, "summarize")
+    summary_week = oneAi_summary(ONEAI_KEY, messages_week_formatted, "summarize")
+    print(f'Summary: {summary_day}\n')
+    print(f'Summary: {summary_week}\n')
     print("B")
-    # action_items = oneAi_summary(ONEAI_KEY, formatted_messages, "action-items")
-    # print(f'Action Items: {action_items}\n')
+    # action_items_week = oneAi_summary(ONEAI_KEY, messages_week_formatted, "action-items")
+    # print(f'Action Items Week: {action_items_week}\n')
     action_items = "Lunch at Chick-fil-A on Saturday at 8 pm."
     print("C")
 
-    return render_template('group_page.html', summary=summary, action_items=action_items)
+    return render_template('group_page.html', daily_summary=summary_day, weekly_summary=summary_week, action_items=action_items)
 # -------------------------------------------------------------------
 
 
